@@ -31,6 +31,8 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
     var currentOriginalUrl: URL?
     var inFullscreen = false
     var preventGestureDelay = false
+    var contentController2: ContentController2?
+    //let scriptMessageHandler2 = WKScriptMessageHandlerWithReply.
     
     private static var sslCertificatesMap: [String: SslCertificate] = [:] // [URL host name : SslCertificate]
     private static var credentialsProposed: [URLCredential] = []
@@ -72,6 +74,7 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
     init(id: Any?, plugin: SwiftFlutterPlugin?, frame: CGRect, configuration: WKWebViewConfiguration,
          contextMenu: [String: Any]?, userScripts: [UserScript] = []) {
         super.init(frame: frame, configuration: configuration)
+        self.contentController2 = ContentController2(webView: self)
         self.id = id
         self.plugin = plugin
         if let id = id, let registrar = plugin?.registrar {
@@ -589,6 +592,9 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         configuration.userContentController.add(self, name: "onWebMessagePortMessageReceived")
         configuration.userContentController.removeScriptMessageHandler(forName: "onWebMessageListenerPostMessageReceived")
         configuration.userContentController.add(self, name: "onWebMessageListenerPostMessageReceived")
+        if #available(iOS 14.0, *) {
+            configuration.userContentController.addScriptMessageHandler(contentController2!, contentWorld: .page, name: "NOMOJSChannel")
+        }
         configuration.userContentController.addUserOnlyScripts(initialUserScripts)
         configuration.userContentController.sync(scriptMessageHandler: self)
     }
@@ -2781,7 +2787,38 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
 //        channel?.invokeMethod("onContextMenuWillPresentForElement", arguments: arguments)
 //    }
     
-    public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    class ContentController2: NSObject, WKScriptMessageHandlerWithReply {
+        var webView: InAppWebView
+        init(webView: InAppWebView) {
+            self.webView = webView
+            super.init()
+        }
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler handler: @escaping (Any?, String?) -> Void) {
+            if message.name == "NOMOJSChannel" {
+                let args = message.body as? String ?? ""
+                
+                let callback = WebViewChannelDelegate.CallJsHandlerCallback()
+                callback.defaultBehaviour = { [weak webView] (response: Any?) in
+                    var json = "null"
+                    if let r = response as? String {
+                        json = r
+                    }
+                    handler("\(json)", nil)
+                }
+                callback.error = { [weak webView] (code: String, message: String?, details: Any?) in
+                    let errorMessage = code + (message != nil ? ", " + (message ?? "") : "")
+                    print(errorMessage)
+                    handler(nil, errorMessage)
+                }
+                
+                if let channelDelegate = webView.channelDelegate {
+                    channelDelegate.onCallJsHandler(handlerName: "NOMOJSChannel", args: "[\"\(args.replacingOccurrences(of: "\"", with: "\\\""))\"]", callback: callback)
+                }
+            }
+        }
+    }
+    public func userContentController(_ userContentController: WKUserContentController, didReceive message:
+                                      WKScriptMessage) {
         guard let body = message.body as? [String: Any?] else {
             return
         }
@@ -2843,7 +2880,6 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
             
             let _callHandlerID = body["_callHandlerID"] as? Int64 ?? 0
             let args = body["args"] as? String ?? ""
-            
             let _windowId = body["_windowId"] as? Int64
             var webView = self
             if let wId = _windowId, let webViewTransport = plugin?.inAppWebViewManager?.windowWebViews[wId] {
